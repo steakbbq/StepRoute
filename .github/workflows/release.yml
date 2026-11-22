@@ -2,6 +2,7 @@ name: release
 
 # Tag push v*  : test, build the zip, upload it to CurseForge.
 # Manual run   : the same, but NOTHING is uploaded to CurseForge (dry run). The zip is kept as a workflow artifact.
+# Needs (for the upload only): secret CF_API_KEY, repository variable CF_PROJECT_ID. The token is never printed.
 on:
   push:
     tags: ["v*"]
