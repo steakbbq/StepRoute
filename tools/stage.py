@@ -1,4 +1,4 @@
-"""Build stage\StepRoute from src and write stage\StepRoute.md5 (one 'md5 *StepRoute/file' line per file).
+r"""Build stage\StepRoute from src and write stage\StepRoute.md5 (one 'md5 *StepRoute/file' line per file).
 
     python -I tools\stage.py
 
