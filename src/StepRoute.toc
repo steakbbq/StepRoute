@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: StepRoute
+## Notes: RestedXP step to Mapzeroth route.
+## Version: 0.1.0
+## OptionalDeps: RXPGuides, Mapzeroth
+## SavedVariables: StepRouteDB
+
+StepRoute.lua
