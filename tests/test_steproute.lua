@@ -110,6 +110,7 @@ end
 
 local function installWorld(opts)
     opts = opts or {}
+    RXP = nil
     RXPGuides = { RegisterGuide = function() end }
     RXPCData = { currentGuideName = "1-11 Durotar", currentStep = 4 }
     RXPFrame = { activeSteps = {} }
@@ -143,7 +144,7 @@ local function snapshot()
         end
     end
     walk(RXPGuides, "RXPGuides", 0); walk(RXPFrame, "RXPFrame", 0); walk(RXPG_ARROW, "RXPG_ARROW", 0)
-    walk(RXPCData, "RXPCData", 0); walk(MapzerothAPI, "MapzerothAPI", 0)
+    walk(RXPCData, "RXPCData", 0); walk(MapzerothAPI, "MapzerothAPI", 0); walk(RXP, "RXP", 0)
     return table.concat(out, "\n")
 end
 
@@ -185,7 +186,7 @@ ok(table.concat(W.newGlobals, ",") == "SLASH_STEPROUTE1,SLASH_STEPROUTE2,StepRou
    table.concat(W.newGlobals, ",") == "SLASH_STEPROUTE1,SLASH_STEPROUTE2",
    "only own globals added: " .. table.concat(W.newGlobals, ","))
 ok(StepRouteDB.on == true and StepRouteDB.start == true, "defaults on + start")
-ok(logText():find("BOOT v=0.1.0 on=1 start=1", 1, true), "boot line: " .. logText())
+ok(logText():find("BOOT v=0.1.1 on=1 start=1", 1, true), "boot line: " .. logText())
 ok(logText():find("mz=1", 1, true), "boot line shows mapzeroth api version")
 ok(#W.calls == 0, "no route before the first read")
 advance(1.1)
@@ -193,7 +194,7 @@ ok(#W.calls == 1, "first read sends once, got " .. #W.calls)
 local c = W.calls[1]
 ok(c and c.points.mapID == 1411 and math.abs(c.points.x - 0.452) < 1e-9 and math.abs(c.points.y - 0.563) < 1e-9,
    "point 0-100 turned into 0-1")
-ok(c and c.name == "1-11 Durotar step 4", "route name: " .. tostring(c and c.name))
+ok(c and c.name == "1-11 Durotar #4", "route name: " .. tostring(c and c.name))
 ok(c and c.options.start == true, "start = true by default")
 ok(logText():find('STEP guide="1-11 Durotar" step=4 map=1411 x=0.452 y=0.563 sent=1 why=ok', 1, true), "STEP line sent=1")
 
@@ -208,7 +209,7 @@ ok(#W.calls == 1, "tiny move is same target")
 -- step change: new target goes out
 go(5, 1411, 50.0, 40.0)
 advance(1.1)
-ok(#W.calls == 2 and W.calls[2].name == "1-11 Durotar step 5", "step change sends once")
+ok(#W.calls == 2 and W.calls[2].name == "1-11 Durotar #5", "step change sends once")
 advance(5)
 ok(#W.calls == 2, "no repeat after change")
 -- 0-1 coordinates are taken as they are
@@ -248,7 +249,7 @@ ok(#W.calls == 1, "still no send in combat")
 COMBAT = false
 fire("PLAYER_REGEN_ENABLED")
 ok(#W.calls == 2, "queued target sent at combat end, got " .. #W.calls)
-ok(W.calls[2].points.x == 0.3 and W.calls[2].name == "1-11 Durotar step 6", "the latest target, not the first")
+ok(W.calls[2].points.x == 0.3 and W.calls[2].name == "1-11 Durotar #6", "the latest target, not the first")
 advance(5)
 ok(#W.calls == 2, "queued target sent once")
 
@@ -448,6 +449,88 @@ ok(#StepRouteDB.log <= 200, "log capped at 200, got " .. #StepRouteDB.log)
 ok(StepRouteDB.log[#StepRouteDB.log]:match("^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d STEP "), "every line has a time stamp")
 
 -------------------------------------------------------------------------------
+-- 13. the guide name the player sees (live 0.1.0 showed the internal key "27-29 ...", RestedXP shows "28-31 ...")
+
+local KEY = "27-29 Wetlands/Excavation Site"
+local function guideOf(fields, season)
+    return { settings = { profile = { season = season } }, currentGuide = fields }
+end
+
+local function nameCase(label, rxp, meta, expectShown, expectSrc)
+    boot()
+    RXPCData.currentGuideName = KEY
+    RXPCData.currentGuideGroup = "RestedXP Forever Dungeon Guide (A)"
+    RXPCData.guideMetaData = meta
+    RXP = rxp
+    go(36, 1455, 69.5, 50.3)
+    advance(1.1)
+    ok(W.calls[1] and W.calls[1].name == expectShown .. " #36", label .. " route name: " .. tostring(W.calls[1] and W.calls[1].name))
+    ok(logText():find('GUIDE key="' .. KEY .. '" shown="' .. expectShown .. '" src=' .. expectSrc, 1, true), label .. " GUIDE line: " .. logText())
+    ok(logText():find('STEP guide="' .. expectShown .. '" step=36 map=1455 x=0.695 y=0.503 sent=1 why=ok', 1, true), label .. " STEP line")
+end
+
+local ALL = { name = KEY, displayname = KEY, eraname = "28-31 Wetlands/Excavation Site", somname = "SoM Wetlands" }
+nameCase("era", guideOf(ALL, 0), nil, "28-31 Wetlands/Excavation Site", "rxp")
+nameCase("era, season nil", guideOf(ALL, nil), nil, "28-31 Wetlands/Excavation Site", "rxp")
+nameCase("som", guideOf(ALL, 1), nil, "SoM Wetlands", "rxp")
+nameCase("som without somname = displayname", guideOf({ name = KEY, displayname = "Shown D", eraname = "Era E" }, 1), nil, "Shown D", "rxp")
+nameCase("era without eraname = displayname", guideOf({ name = KEY, displayname = "Shown D", somname = "Som S" }, 0), nil, "Shown D", "rxp")
+nameCase("colour codes stripped", guideOf({ name = KEY, eraname = "|cff00ff00Green|r Wetlands" }, 0), nil, "Green Wetlands", "rxp")
+nameCase("guide without names: key", guideOf({ name = KEY }, 0), nil, KEY, "key")
+nameCase("no RXP, no meta: key", nil, nil, KEY, "key")
+nameCase("no RXP, meta by key", nil,
+    { ["RestedXP Forever Dungeon Guide (A)||" .. KEY] = { name = KEY, displayname = "Meta D", eraname = "Meta Era" } },
+    "Meta Era", "meta")
+nameCase("no RXP, meta found by name", nil,
+    { ["some other key"] = { name = KEY, displayname = "Meta D" } }, "Meta D", "meta")
+nameCase("RXP without currentGuide, meta", { settings = { profile = { season = 0 } } },
+    { ["RestedXP Forever Dungeon Guide (A)||" .. KEY] = { name = KEY, eraname = "Meta Era" } }, "Meta Era", "meta")
+nameCase("name fields not text: key", guideOf({ name = KEY, eraname = 42, displayname = {} }, 0), nil, KEY, "key")
+
+-- one GUIDE line per guide change, not per send
+boot()
+RXPCData.currentGuideName = KEY
+RXP = guideOf(ALL, 0)
+advance(1.1)
+go(37, 1455, 10, 10); advance(1.1)
+go(38, 1455, 20, 20); advance(1.1)
+ok(count(logText(), "GUIDE key") == 1, "GUIDE once for three sends, got " .. count(logText(), "GUIDE key"))
+RXPCData.currentGuideName = "31-33 Arathi Highlands"
+RXP = guideOf({ name = "31-33 Arathi Highlands", eraname = "33-36 Arathi Highlands" }, 0)
+go(1, 1417, 30, 30); advance(1.1)
+ok(count(logText(), "GUIDE key") == 2, "second GUIDE line for the new guide")
+ok(logText():find('GUIDE key="31-33 Arathi Highlands" shown="33-36 Arathi Highlands" src=rxp', 1, true), "new guide line")
+ok(W.calls[#W.calls].name == "33-36 Arathi Highlands #1", "route name for the new guide: " .. tostring(W.calls[#W.calls].name))
+-- a guide with no point still gets its GUIDE line (no send needed)
+go(2, nil)
+RXPCData.currentGuideName = "11-12 Elwynn"
+RXP = guideOf({ name = "11-12 Elwynn", eraname = "11-12 Elwynn Forest" }, 0)
+advance(1.1)
+ok(logText():find('GUIDE key="11-12 Elwynn" shown="11-12 Elwynn Forest"', 1, true), "GUIDE line without a send")
+
+-- reading the guide name fails: logged once, the route still goes out under the key
+boot()
+RXPCData.currentGuideName = KEY
+RXP = { settings = { profile = { season = 0 } },
+        currentGuide = setmetatable({}, { __index = function() error("guide internals changed") end }) }
+go(36, 1455, 69.5, 50.3)
+advance(20)
+ok(#W.calls == 1 and W.calls[1].name == KEY .. " #36", "guide name read error: route under the key")
+ok(count(logText(), "RXP read fail guide name") == 1, "guide name read error: one fail line")
+ok(logText():find('src=key', 1, true), "guide name read error: src=key")
+
+-- read only: the live guide, RXP settings and saved data are not written
+boot()
+RXPCData.currentGuideName = KEY
+RXPCData.guideMetaData = { a = { name = KEY, eraname = "E" } }
+RXP = guideOf(ALL, 0)
+advance(1.1)
+local gA = snapshot()
+advance(30)
+slash("now")
+ok(gA == snapshot(), "guide name read writes nothing on RXP, RXPCData or Mapzeroth tables")
+
+-------------------------------------------------------------------------------
 -- 12. toc
 
 local f = assert(io.open(SRC .. "/StepRoute.toc", "rb"))
@@ -455,7 +538,7 @@ local toc = f:read("*a"); f:close()
 ok(toc:find("## Interface: 16001", 1, true), "toc interface 16001")
 ok(toc:find("## OptionalDeps: RXPGuides, Mapzeroth", 1, true), "toc optional deps")
 ok(toc:find("## SavedVariables: StepRouteDB", 1, true), "toc saved variable")
-ok(toc:find("## Version: 0.1.0", 1, true), "toc version matches")
+ok(toc:find("## Version: 0.1.1", 1, true), "toc version matches")
 ok(toc:find("StepRoute.lua", 1, true), "toc lists the file")
 
 realPrint(string.format("RESULT steproute pass=%d fail=%d", PASS, FAIL))

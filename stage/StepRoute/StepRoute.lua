@@ -1,12 +1,14 @@
 -- StepRoute: when the active RestedXP step has a map point, ask Mapzeroth for a route to it.
 -- Read only. No hooks. No field is written on a RestedXP, Mapzeroth or Blizzard table.
--- RestedXP state read (all by named globals, never the debug global RXP):
+-- RestedXP state read, by named globals:
 --   RXPG_ARROW.element   the point the RestedXP arrow shows
 --   RXPFrame.activeSteps the active steps, fallback when the arrow has no usable point
---   RXPCData             saved per-character data: currentGuideName, currentStep
+--   RXPCData             saved per-character data: currentGuideName, currentStep, guideMetaData
+-- Only for the guide name the player sees: RXP.currentGuide and RXP.settings.profile.season
+-- (RXP is RestedXP's debug global; if it is gone the name falls back, nothing else changes).
 -- Mapzeroth: MapzerothAPI.RouteTo(points, name, options).
 
-local VERSION = "0.1.0"
+local VERSION = "0.1.1"
 local LOG_MAX = 200
 local TICK = 1        -- seconds between reads
 local DEFER = 0.5     -- seconds an event waits, so RestedXP has moved first
@@ -111,12 +113,83 @@ local function Read()
     return "none", "no point"
 end
 
-local function GuideName()
+-- a name as text: no colour codes, no group path
+local function Clean(s)
+    s = s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    return s:match("([^\\]+)$") or s
+end
+
+-- the name RestedXP shows for a guide table: somname in season 1, else eraname, else displayname
+-- (the same rule as RestedXP's own title; a field that is not a text is no name)
+local function PickName(t, season1)
+    if type(t) ~= "table" then return nil end
+    local n
+    if season1 and t.somname then n = t.somname
+    elseif not season1 and t.eraname then n = t.eraname
+    else n = t.displayname end
+    if type(n) == "string" and n ~= "" then return n end
+end
+
+-- the guide inputs, cheap: internal key, live guide table, season 1 or not
+local function GuideInputs()
     local c = _G.RXPCData
-    local g = type(c) == "table" and c.currentGuideName
-    if type(g) ~= "string" or g == "" then return "?" end
-    g = g:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
-    return g:match("([^\\]+)$") or g
+    local key = type(c) == "table" and type(c.currentGuideName) == "string" and c.currentGuideName ~= ""
+        and c.currentGuideName or nil
+    local rxp = type(_G.RXP) == "table" and _G.RXP or nil
+    local profile = rxp and type(rxp.settings) == "table" and rxp.settings.profile
+    local guide = rxp and type(rxp.currentGuide) == "table" and rxp.currentGuide or nil
+    if guide and not key and type(guide.name) == "string" then key = guide.name end
+    return key, guide, type(profile) == "table" and profile.season == 1
+end
+
+-- the name the player sees, and where it came from:
+--   rxp  the live guide table (RXP.currentGuide, season from RXP.settings.profile.season)
+--   meta RXPCData.guideMetaData, when the live guide is not readable
+--   key  RXPCData.currentGuideName, the internal key, last resort
+local function ResolveGuide(key, guide, season1)
+    local shown = PickName(guide, season1)
+    if shown then return shown, "rxp" end
+    local c = _G.RXPCData
+    local meta = type(c) == "table" and type(c.guideMetaData) == "table" and c.guideMetaData
+    if meta and key then
+        local m = meta[tostring(c.currentGuideGroup) .. "||" .. key]
+        if type(m) ~= "table" then
+            m = nil
+            for _, v in pairs(meta) do
+                if type(v) == "table" and v.name == key then m = v; break end
+            end
+        end
+        shown = PickName(m, season1)
+        if shown then return shown, "meta" end
+    end
+    return key, "key"
+end
+
+local gKey, gGuide, gSeason, gShown, gSrc   -- the last resolution, kept until an input changes
+local gLogged                               -- the GUIDE line already written
+
+-- the name the player sees for the active guide; logs one GUIDE line per change. Never raises.
+local function Guide()
+    local ok, key, guide, season1 = pcall(GuideInputs)
+    if not ok then key, guide, season1 = nil, nil, false end
+    if not (gSrc and key == gKey and guide == gGuide and season1 == gSeason) then
+        local ok2, shown, src = pcall(ResolveGuide, key, guide, season1)
+        if not (ok and ok2) then
+            if not seen["fail:guide name"] then
+                seen["fail:guide name"] = true
+                Log("RXP read fail guide name")
+            end
+            shown, src = key, "key"
+        end
+        gKey, gGuide, gSeason = key, guide, season1
+        gShown, gSrc = shown and Clean(shown) or "?", src
+        local line = ("%s|%s|%s"):format(tostring(key), gShown, gSrc)
+        if line ~= gLogged then
+            gLogged = line
+            Log('GUIDE key="%s" shown="%s" src=%s', tostring(key), gShown, gSrc)
+        end
+    end
+    return gShown
 end
 
 local function StepNumber(e)
@@ -155,7 +228,8 @@ local function Send(guide, step, map, x, y)
         Warn("nomz", "Mapzeroth missing")
         return false
     end
-    local name = ("%s step %s"):format(guide, tostring(step))
+    -- short: the name the player sees, then the step as #N (Mapzeroth shows its own "Step 1 of 1" for route legs)
+    local name = ("%s #%s"):format(guide, tostring(step))
     local opts = DB.start and { start = true } or {}
     local ok, res, why = pcall(mz.RouteTo, { mapID = map, x = x, y = y }, name, opts)
     if not ok then
@@ -178,6 +252,7 @@ end
 local function Check(force)
     if not DB or not DB.on then return "off" end
     force = force or again
+    local shown = Guide()          -- also writes the GUIDE line when the guide changed
     local st, e = Read()
 
     if st == "fail" then
@@ -193,7 +268,7 @@ local function Check(force)
         if noneWhy ~= e then
             noneWhy = e
             local c = _G.RXPCData
-            LogStep(GuideName(), type(c) == "table" and tonumber(c.currentStep) or "?", nil, nil, nil, 0, e)
+            LogStep(shown, type(c) == "table" and tonumber(c.currentStep) or "?", nil, nil, nil, 0, e)
         end
         return e
     end
@@ -206,12 +281,12 @@ local function Check(force)
         return "same"
     end
 
-    local guide, step = GuideName(), StepNumber(e)
+    local step = StepNumber(e)
     if InCombatLockdown and InCombatLockdown() then
         again = again or force
         if combatKey ~= key or force then
             combatKey = key
-            LogStep(guide, step, map, x, y, 0, "combat")
+            LogStep(shown, step, map, x, y, 0, "combat")
         end
         return "queued"
     end
@@ -219,7 +294,7 @@ local function Check(force)
     combatKey = nil
     again = false
     sentKey = key
-    return Send(guide, step, map, x, y) and "sent" or "refused"
+    return Send(shown, step, map, x, y) and "sent" or "refused"
 end
 
 -- an event: look again soon, once however many events came
