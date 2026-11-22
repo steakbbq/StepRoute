@@ -1,0 +1,80 @@
+name: release
+
+# Tag push v*  : test, build the zip, upload it to CurseForge.
+# Manual run   : the same, but NOTHING is uploaded to CurseForge (dry run). The zip is kept as a workflow artifact.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lua tests (PUC Lua 5.1)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lua5.1
+          lua5.1 -e 'HERE="tests"; SRC="src"' tests/test_steproute.lua
+
+      - name: Release tool tests
+        run: python3 -I -m unittest discover -s tests -p test_release.py -v
+
+      - name: Check tag, toc and changelog
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          if [ -n "$TAG" ]; then
+            python3 -I tools/release.py check --tag "$TAG"
+          else
+            python3 -I tools/release.py check
+          fi
+
+      - name: Build the zip (same files as stage/)
+        run: python3 -I tools/release.py build --out dist --check-stage
+
+      # Read only: lists the CurseForge game versions. The token is used for GET calls here, nothing is uploaded.
+      - name: CurseForge game versions (read only)
+        env:
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+        run: python3 -I tools/release.py versions --skip-if-no-token
+
+      - name: Show what an upload would send (no upload)
+        env:
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          CF_PROJECT_ID: ${{ vars.CF_PROJECT_ID }}
+        run: python3 -I tools/release.py upload --dry-run --zip "$(ls dist/StepRoute-*.zip)"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: StepRoute-zip
+          path: dist/StepRoute-*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: StepRoute-zip
+          path: dist
+
+      - name: Upload to CurseForge
+        env:
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          CF_PROJECT_ID: ${{ vars.CF_PROJECT_ID }}
+          TAG: ${{ github.ref_name }}
+        run: python3 -I tools/release.py upload --zip "dist/StepRoute-${TAG#v}.zip" --project-id "$CF_PROJECT_ID" --tag "$TAG"
