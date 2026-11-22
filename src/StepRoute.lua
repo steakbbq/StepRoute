@@ -16,6 +16,7 @@ local DB                -- StepRouteDB, set at PLAYER_LOGIN
 local sentKey           -- last target given to Mapzeroth (or tried)
 local combatKey         -- target already logged as waiting for combat end
 local noneWhy           -- last "no point" reason already logged
+local again = false     -- /stepr now came in combat: send the same target again at combat end
 local queued = false    -- a deferred check is waiting
 local errN = 0
 local seen = {}         -- one-time lines and chat messages
@@ -176,6 +177,7 @@ end
 -- force: send the current target again. Returns a short word for /stepr now.
 local function Check(force)
     if not DB or not DB.on then return "off" end
+    force = force or again
     local st, e = Read()
 
     if st == "fail" then
@@ -206,6 +208,7 @@ local function Check(force)
 
     local guide, step = GuideName(), StepNumber(e)
     if InCombatLockdown and InCombatLockdown() then
+        again = again or force
         if combatKey ~= key or force then
             combatKey = key
             LogStep(guide, step, map, x, y, 0, "combat")
@@ -214,6 +217,7 @@ local function Check(force)
     end
 
     combatKey = nil
+    again = false
     sentKey = key
     return Send(guide, step, map, x, y) and "sent" or "refused"
 end
@@ -287,7 +291,7 @@ SlashCmdList["STEPROUTE"] = function(msg)
     local a, b = (msg or ""):lower():match("^%s*(%S*)%s*(%S*)")
     if a == "on" then
         DB.on = true
-        sentKey, combatKey, noneWhy = nil, nil, nil
+        sentKey, combatKey, noneWhy, again = nil, nil, nil, false
         Say("on")
         Safe("check", Check)
     elseif a == "off" then
