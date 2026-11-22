@@ -186,7 +186,7 @@ ok(table.concat(W.newGlobals, ",") == "SLASH_STEPROUTE1,SLASH_STEPROUTE2,StepRou
    table.concat(W.newGlobals, ",") == "SLASH_STEPROUTE1,SLASH_STEPROUTE2",
    "only own globals added: " .. table.concat(W.newGlobals, ","))
 ok(StepRouteDB.on == true and StepRouteDB.start == true, "defaults on + start")
-ok(logText():find("BOOT v=0.1.1 on=1 start=1", 1, true), "boot line: " .. logText())
+ok(logText():find("BOOT v=0.1.2 on=1 start=1", 1, true), "boot line: " .. logText())
 ok(logText():find("mz=1", 1, true), "boot line shows mapzeroth api version")
 ok(#W.calls == 0, "no route before the first read")
 advance(1.1)
@@ -194,7 +194,7 @@ ok(#W.calls == 1, "first read sends once, got " .. #W.calls)
 local c = W.calls[1]
 ok(c and c.points.mapID == 1411 and math.abs(c.points.x - 0.452) < 1e-9 and math.abs(c.points.y - 0.563) < 1e-9,
    "point 0-100 turned into 0-1")
-ok(c and c.name == "1-11 Durotar #4", "route name: " .. tostring(c and c.name))
+ok(c and c.name == "Go #4", "route name: " .. tostring(c and c.name))
 ok(c and c.options.start == true, "start = true by default")
 ok(logText():find('STEP guide="1-11 Durotar" step=4 map=1411 x=0.452 y=0.563 sent=1 why=ok', 1, true), "STEP line sent=1")
 
@@ -209,7 +209,7 @@ ok(#W.calls == 1, "tiny move is same target")
 -- step change: new target goes out
 go(5, 1411, 50.0, 40.0)
 advance(1.1)
-ok(#W.calls == 2 and W.calls[2].name == "1-11 Durotar #5", "step change sends once")
+ok(#W.calls == 2 and W.calls[2].name == "Go #5", "step change sends once")
 advance(5)
 ok(#W.calls == 2, "no repeat after change")
 -- 0-1 coordinates are taken as they are
@@ -249,7 +249,7 @@ ok(#W.calls == 1, "still no send in combat")
 COMBAT = false
 fire("PLAYER_REGEN_ENABLED")
 ok(#W.calls == 2, "queued target sent at combat end, got " .. #W.calls)
-ok(W.calls[2].points.x == 0.3 and W.calls[2].name == "1-11 Durotar #6", "the latest target, not the first")
+ok(W.calls[2].points.x == 0.3 and W.calls[2].name == "Go #6", "the latest target, not the first")
 advance(5)
 ok(#W.calls == 2, "queued target sent once")
 
@@ -463,10 +463,12 @@ local function nameCase(label, rxp, meta, expectShown, expectSrc)
     RXPCData.guideMetaData = meta
     RXP = rxp
     go(36, 1455, 69.5, 50.3)
+    RXPG_ARROW.element.text = nil           -- no step text: the name falls back to the guide name
     advance(1.1)
     ok(W.calls[1] and W.calls[1].name == expectShown .. " #36", label .. " route name: " .. tostring(W.calls[1] and W.calls[1].name))
     ok(logText():find('GUIDE key="' .. KEY .. '" shown="' .. expectShown .. '" src=' .. expectSrc, 1, true), label .. " GUIDE line: " .. logText())
     ok(logText():find('STEP guide="' .. expectShown .. '" step=36 map=1455 x=0.695 y=0.503 sent=1 why=ok', 1, true), label .. " STEP line")
+    ok(logText():find('text="' .. expectShown .. ' #36" src=guide', 1, true), label .. " STEP text + src=guide")
 end
 
 local ALL = { name = KEY, displayname = KEY, eraname = "28-31 Wetlands/Excavation Site", somname = "SoM Wetlands" }
@@ -497,7 +499,7 @@ go(38, 1455, 20, 20); advance(1.1)
 ok(count(logText(), "GUIDE key") == 1, "GUIDE once for three sends, got " .. count(logText(), "GUIDE key"))
 RXPCData.currentGuideName = "31-33 Arathi Highlands"
 RXP = guideOf({ name = "31-33 Arathi Highlands", eraname = "33-36 Arathi Highlands" }, 0)
-go(1, 1417, 30, 30); advance(1.1)
+go(1, 1417, 30, 30); RXPG_ARROW.element.text = nil; advance(1.1)
 ok(count(logText(), "GUIDE key") == 2, "second GUIDE line for the new guide")
 ok(logText():find('GUIDE key="31-33 Arathi Highlands" shown="33-36 Arathi Highlands" src=rxp', 1, true), "new guide line")
 ok(W.calls[#W.calls].name == "33-36 Arathi Highlands #1", "route name for the new guide: " .. tostring(W.calls[#W.calls].name))
@@ -514,6 +516,7 @@ RXPCData.currentGuideName = KEY
 RXP = { settings = { profile = { season = 0 } },
         currentGuide = setmetatable({}, { __index = function() error("guide internals changed") end }) }
 go(36, 1455, 69.5, 50.3)
+RXPG_ARROW.element.text = nil
 advance(20)
 ok(#W.calls == 1 and W.calls[1].name == KEY .. " #36", "guide name read error: route under the key")
 ok(count(logText(), "RXP read fail guide name") == 1, "guide name read error: one fail line")
@@ -531,6 +534,131 @@ slash("now")
 ok(gA == snapshot(), "guide name read writes nothing on RXP, RXPCData or Mapzeroth tables")
 
 -------------------------------------------------------------------------------
+-- 14. route name = the last text line of the step, plus " #N"
+
+local GOTO = {}      -- marks the element the arrow points at
+local function stepCase(label, els, expectName, expectSrc, opts)
+    opts = opts or {}
+    boot()
+    RXPCData.currentGuideName = KEY
+    local step = newStep(37)
+    local arrow
+    for _, el in ipairs(els) do
+        if el == GOTO then
+            el = { arrow = true, zone = 1455, x = 69.5, y = 50.3, wx = 1, wy = 2 }
+            arrow = el
+        elseif type(el) == "string" then
+            el = { text = el }
+        end
+        if not opts.noBackRef then el.step = step end
+        step.elements[#step.elements + 1] = el
+    end
+    for _, old in ipairs(RXPFrame.activeSteps) do old.active = nil end
+    RXPFrame.activeSteps[1] = step
+    RXPG_ARROW.element = (not opts.scan) and arrow or nil
+    advance(1.1)
+    local call = W.calls[#W.calls]
+    ok(call and call.name == expectName, label .. " name: " .. tostring(call and call.name))
+    if not opts.noLog then
+        ok(logText():find('text="' .. expectName .. '" src=' .. expectSrc, 1, true), label .. " log text + src: " .. logText())
+    end
+    return call
+end
+
+local function dashes(n) return ("abcd "):rep(n) end
+
+-- Screenshot: step 37, "Talk to Gryth Thurden" then "Fly to Wetlands"
+local c37 = stepCase("2 lines", { GOTO, "Talk to Gryth Thurden", "Fly to Wetlands" }, "Fly to Wetlands #37", "step")
+ok(c37 and c37.points.mapID == 1455, "2 lines: the point is unchanged")
+ok(logText():find('STEP guide="27-29 Wetlands/Excavation Site" step=37 map=1455 x=0.695 y=0.503 sent=1 why=ok start=1 text="Fly to Wetlands #37" src=step', 1, true), "2 lines: full STEP line")
+stepCase("goto last in the list", { "Talk to Gryth Thurden", "Fly to Wetlands", GOTO }, "Fly to Wetlands #37", "step")
+stepCase("1 line", { GOTO, "Talk to Gryth Thurden" }, "Talk to Gryth Thurden #37", "step")
+stepCase("2 lines in one element", { GOTO, "Talk to Gryth Thurden\nFly to Wetlands" }, "Fly to Wetlands #37", "step")
+stepCase("literal backslash n", { GOTO, "Talk to Gryth Thurden\\nFly to Wetlands" }, "Fly to Wetlands #37", "step")
+stepCase("empty last lines skipped", { GOTO, "Fly to Wetlands\n   \n" }, "Fly to Wetlands #37", "step")
+stepCase("one space text ignored", { GOTO, "Fly to Wetlands", " " }, "Fly to Wetlands #37", "step")
+stepCase("hideTooltip element ignored", { GOTO, "Fly to Wetlands", { text = "Hidden line", hideTooltip = true } }, "Fly to Wetlands #37", "step")
+stepCase("tooltipText when no text", { GOTO, { tooltipText = "Tip line" } }, "Tip line #37", "step")
+stepCase("rawtext when no text", { GOTO, { rawtext = "Raw line" } }, "Raw line #37", "step")
+stepCase("text beats tooltipText", { GOTO, { text = "Own text", tooltipText = "Tip line" } }, "Own text #37", "step")
+
+-- codes stripped
+stepCase("colour codes", { GOTO, "|cff00ff00Talk|r to |cffffd100Gryth Thurden|r" }, "Talk to Gryth Thurden #37", "step")
+stepCase("texture + atlas tags", { GOTO, "|TInterface\\Icons\\Foo:0|t Fly |A:Taxi_Frame_Gray:12:12|a to   Wetlands" }, "Fly to Wetlands #37", "step")
+stepCase("RXP colour tokens", { GOTO, "Talk to |cRXP_FRIENDLY_Gryth Thurden|r" }, "Talk to Gryth Thurden #37", "step")
+stepCase("RXP bare token", { GOTO, "Kill RXP_ENEMY_Boars" }, "Kill Boars #37", "step")
+stepCase("npc token", { GOTO, "Talk to npc:Gryth Thurden:2431" }, "Talk to Gryth Thurden #37", "step")
+stepCase("name::id", { GOTO, "Talk to |cffffd100Gryth Thurden::2431|r" }, "Talk to Gryth Thurden #37", "step")
+stepCase("link", { GOTO, "Get |Hitem:1234::::|h[Linen Cloth]|h" }, "Get [Linen Cloth] #37", "step")
+stepCase("stray pipe", { GOTO, "Fly to |Wetlands" }, "Fly to Wetlands #37", "step")
+stepCase("extra spaces", { GOTO, "  Fly    to \t Wetlands  " }, "Fly to Wetlands #37", "step")
+
+-- long text: cut on a word, "..." added
+stepCase("long text", { GOTO, "Kill 12 Dragonmaw Warriors and bring back their heads to the quest giver" },
+    "Kill 12 Dragonmaw Warriors and bring... #37", "step")
+stepCase("cut exactly at a word end", { GOTO, dashes(7) .. "abcde more words here" }, dashes(7) .. "abcde... #37", "step")
+stepCase("exactly 40 chars is not cut", { GOTO, dashes(7) .. "abcde" }, dashes(7) .. "abcde #37", "step")
+stepCase("one long word: hard cut", { GOTO, ("w"):rep(60) }, ("w"):rep(40) .. "... #37", "step")
+stepCase("UTF-8 not cut inside a character", { GOTO, ("\226\130\172"):rep(20) }, ("\226\130\172"):rep(13) .. "... #37", "step")
+ok(#W.calls[#W.calls].name <= 40 + 3 + 4, "long text: name length kept short")
+stepCase("a quote in the text", { GOTO, 'Talk to "Gryth"' }, 'Talk to "Gryth" #37', "step", { noLog = true })
+ok(logText():find("text=\"Talk to 'Gryth' #37\"", 1, true), "a quote in the text is written as ' in the log")
+
+-- no text: the 0.1.1 name
+stepCase("no text", { GOTO }, KEY .. " #37", "guide")
+stepCase("only a one-space text", { GOTO, " " }, KEY .. " #37", "guide")
+stepCase("only codes", { GOTO, "|cff00ff00|r |TFoo|t" }, KEY .. " #37", "guide")
+stepCase("text not a string", { GOTO, { text = 42, tooltipText = {}, rawtext = true } }, KEY .. " #37", "guide")
+
+-- scan path: the element has no step field, the step comes from the active steps
+stepCase("scan path without element.step", { GOTO, "Fly to Wetlands" }, "Fly to Wetlands #37", "step", { scan = true, noBackRef = true })
+-- the step number is the step's index also then
+ok(logText():find("step=37 map=1455", 1, true), "scan path: step number from the step")
+
+-- reading the step text fails: logged once, the route goes out under the guide name
+local bad = setmetatable({}, { __index = function() error("step internals changed") end })
+local cb = stepCase("step text read error", { GOTO, bad }, KEY .. " #37", "guide")
+ok(count(logText(), "RXP read fail step text") == 1, "step text read error: one fail line")
+advance(20)
+ok(#W.calls == 1 and count(logText(), "RXP read fail step text") == 1, "step text read error: no loop")
+
+-- combat line carries the text too; same position with new text is not sent again
+boot()
+advance(1.1)
+COMBAT = true
+go(37, 1455, 40, 40)
+RXPG_ARROW.element.step.elements[#RXPG_ARROW.element.step.elements + 1] = { text = "Fly to Wetlands", step = RXPG_ARROW.element.step }
+advance(2)
+ok(logText():find('sent=0 why=combat start=1 text="Fly to Wetlands #37" src=step', 1, true), "combat line has the text")
+COMBAT = false
+fire("PLAYER_REGEN_ENABLED")
+ok(W.calls[#W.calls].name == "Fly to Wetlands #37", "queued send has the text")
+local n1 = #W.calls
+go(38, 1455, 40, 40)
+RXPG_ARROW.element.step.elements[#RXPG_ARROW.element.step.elements + 1] = { text = "Another text", step = RXPG_ARROW.element.step }
+advance(5)
+ok(#W.calls == n1, "same position, new step text: not sent again")
+slash("now")
+ok(#W.calls == n1 + 1 and W.calls[#W.calls].name == "Another text #38", "now sends the new text")
+
+-- read only: step text reading writes nothing
+boot()
+RXPCData.currentGuideName = KEY
+do
+    local step = newStep(37)
+    local el = { arrow = true, zone = 1455, x = 69.5, y = 50.3, wx = 1, wy = 2, step = step }
+    step.elements = { el, { text = "|cff00ff00Fly|r to Wetlands", step = step } }
+    RXPFrame.activeSteps[1].active = nil
+    RXPFrame.activeSteps[1] = step
+    RXPG_ARROW.element = el
+end
+advance(1.1)
+local sA = snapshot()
+advance(30)
+slash("now")
+ok(sA == snapshot(), "step text reading writes nothing on RestedXP, RXPCData or Mapzeroth tables")
+
+-------------------------------------------------------------------------------
 -- 12. toc
 
 local f = assert(io.open(SRC .. "/StepRoute.toc", "rb"))
@@ -538,7 +666,7 @@ local toc = f:read("*a"); f:close()
 ok(toc:find("## Interface: 16001", 1, true), "toc interface 16001")
 ok(toc:find("## OptionalDeps: RXPGuides, Mapzeroth", 1, true), "toc optional deps")
 ok(toc:find("## SavedVariables: StepRouteDB", 1, true), "toc saved variable")
-ok(toc:find("## Version: 0.1.1", 1, true), "toc version matches")
+ok(toc:find("## Version: 0.1.2", 1, true), "toc version matches")
 ok(toc:find("StepRoute.lua", 1, true), "toc lists the file")
 
 realPrint(string.format("RESULT steproute pass=%d fail=%d", PASS, FAIL))

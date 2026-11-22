@@ -1,14 +1,14 @@
 -- StepRoute: when the active RestedXP step has a map point, ask Mapzeroth for a route to it.
 -- Read only. No hooks. No field is written on a RestedXP, Mapzeroth or Blizzard table.
 -- RestedXP state read, by named globals:
---   RXPG_ARROW.element   the point the RestedXP arrow shows
+--   RXPG_ARROW.element   the point the RestedXP arrow shows (its step gives the step text for the route name)
 --   RXPFrame.activeSteps the active steps, fallback when the arrow has no usable point
 --   RXPCData             saved per-character data: currentGuideName, currentStep, guideMetaData
 -- Only for the guide name the player sees: RXP.currentGuide and RXP.settings.profile.season
 -- (RXP is RestedXP's debug global; if it is gone the name falls back, nothing else changes).
 -- Mapzeroth: MapzerothAPI.RouteTo(points, name, options).
 
-local VERSION = "0.1.1"
+local VERSION = "0.1.2"
 local LOG_MAX = 200
 local TICK = 1        -- seconds between reads
 local DEFER = 0.5     -- seconds an event waits, so RestedXP has moved first
@@ -69,18 +69,18 @@ local function HasPoint(e)
     return tonumber(e.zone) and tonumber(e.x) and tonumber(e.y)
 end
 
--- first live arrow element with a map point in the active steps; normal before low priority.
--- second result: an element had world coordinates but no map point (RestedXP field names changed)
+-- first live arrow element with a map point in the active steps, and its step; normal before low priority.
+-- third result: an element had world coordinates but no map point (RestedXP field names changed)
 local function Scan(steps)
-    local low, odd
+    local low, lowStep, odd
     for _, step in ipairs(steps) do
         local els = type(step) == "table" and step.elements
         if type(els) == "table" then
             for _, e in ipairs(els) do
                 if type(e) == "table" and e.arrow and Live(e) then
                     if HasPoint(e) then
-                        if not e.lowPrio then return e end
-                        low = low or e
+                        if not e.lowPrio then return e, step end
+                        if not low then low, lowStep = e, step end
                     elseif tonumber(e.wx) and tonumber(e.wy) then
                         odd = true
                     end
@@ -88,10 +88,10 @@ local function Scan(steps)
             end
         end
     end
-    return low, odd
+    return low, lowStep, odd
 end
 
--- "ok", element | "none", why | "fail", what
+-- "ok", element, step | "none", why | "fail", what
 local function Read()
     local af, rf = _G.RXPG_ARROW, _G.RXPFrame
     if not (_G.RXPGuides or af or rf) then return "fail", "RXPGuides missing" end
@@ -101,14 +101,14 @@ local function Read()
         local e = af.element
         if e ~= nil and type(e) ~= "table" then return "fail", "RXPG_ARROW.element" end
         if e and type(e.step) == "table" and e.step.active and HasPoint(e) and Live(e) then
-            return "ok", e
+            return "ok", e, e.step
         end
     end
 
     local steps = type(rf) == "table" and rf.activeSteps
     if type(steps) ~= "table" then return "fail", "RXPFrame.activeSteps" end
-    local e, odd = Scan(steps)
-    if e then return "ok", e end
+    local e, estep, odd = Scan(steps)
+    if e then return "ok", e, estep end
     if odd then return "fail", "element zone/x/y" end
     return "none", "no point"
 end
@@ -192,8 +192,70 @@ local function Guide()
     return gShown
 end
 
-local function StepNumber(e)
-    local n = type(e) == "table" and type(e.step) == "table" and tonumber(e.step.index)
+-- one line of step text as plain text: no colour codes, textures, atlas tags, links, npc tokens, stray pipes
+local function CleanText(s)
+    s = s:gsub("|T.-|t", ""):gsub("|A.-|a", "")
+    s = s:gsub("|H.-|h(.-)|h", "%1")
+    s = s:gsub("|cRXP_%u+_", ""):gsub("RXP_%u+_", "")
+    s = s:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    s = s:gsub("npc:(.-):%d+", "%1"):gsub("::%d+", "")
+    s = s:gsub("|", ""):gsub("%s+", " ")
+    return (s:gsub("^ ", ""):gsub(" $", ""))
+end
+
+local TEXT_MAX = 40
+
+-- cut a long text on a word (never inside a UTF-8 character) and add "..."
+local function Shorten(s)
+    if #s <= TEXT_MAX then return s end
+    local i = TEXT_MAX
+    while i > 0 and (s:byte(i + 1) or 0) >= 128 and (s:byte(i + 1) or 0) < 192 do i = i - 1 end
+    local cut = s:sub(1, i)
+    if not s:sub(i + 1, i + 1):match("%s") then cut = cut:match("^(.*%S)%s+%S*$") or cut end
+    return cut .. "..."
+end
+
+-- the last text line of a step as the guide window lists it: the elements in order, each with its text
+-- (else tooltipText, else rawtext), a text of one space and hideTooltip elements left out
+local function StepText(step)
+    local els = type(step) == "table" and step.elements
+    if type(els) ~= "table" then return nil end
+    local last
+    for _, el in ipairs(els) do
+        if type(el) == "table" and not el.hideTooltip then
+            local raw
+            if type(el.text) == "string" and el.text ~= " " then raw = el.text
+            elseif type(el.tooltipText) == "string" and el.tooltipText ~= "" then raw = el.tooltipText
+            elseif type(el.rawtext) == "string" and el.rawtext ~= "" then raw = el.rawtext end
+            if raw then
+                for line in raw:gsub("\\n", "\n"):gmatch("[^\n]+") do
+                    line = CleanText(line)
+                    if line ~= "" then last = line end
+                end
+            end
+        end
+    end
+    return last and Shorten(last)
+end
+
+-- the route name and where it came from: "<last step text> #N" (step), else "<guide name> #N" (guide)
+local function RouteName(step, shown, n)
+    local ok, text = pcall(StepText, step)
+    if not ok then
+        if not seen["fail:step text"] then
+            seen["fail:step text"] = true
+            Log("RXP read fail step text")
+        end
+        text = nil
+    end
+    -- short: Mapzeroth shows its own "Step 1 of 1" for route legs, so the step is only #N
+    if text then return ("%s #%s"):format(text, tostring(n)), "step" end
+    return ("%s #%s"):format(shown, tostring(n)), "guide"
+end
+
+local function StepNumber(e, estep)
+    local s = type(e) == "table" and (type(e.step) == "table" and e.step or estep)
+    local n = type(s) == "table" and tonumber(s.index)
     if n then return n end
     local c = _G.RXPCData
     return type(c) == "table" and tonumber(c.currentStep) or "?"
@@ -213,35 +275,34 @@ end
 -------------------------------------------------------------------------------
 -- send to Mapzeroth
 
-local function LogStep(guide, step, map, x, y, sent, why)
-    Log('STEP guide="%s" step=%s map=%s x=%s y=%s sent=%d why=%s start=%d',
+-- name: the route name used (text="..."), src: step | guide
+local function LogStep(guide, step, map, x, y, sent, why, name, src)
+    Log('STEP guide="%s" step=%s map=%s x=%s y=%s sent=%d why=%s start=%d text="%s" src=%s',
         guide, tostring(step), map and tostring(map) or "-",
         x and ("%.3f"):format(x) or "-", y and ("%.3f"):format(y) or "-",
-        sent, why, DB.start and 1 or 0)
+        sent, why, DB.start and 1 or 0, name and (name:gsub('"', "'")) or "-", src or "-")
 end
 
 -- true when Mapzeroth took the route
-local function Send(guide, step, map, x, y)
+local function Send(guide, step, map, x, y, name, src)
     local mz = _G.MapzerothAPI
     if type(mz) ~= "table" or type(mz.RouteTo) ~= "function" then
-        LogStep(guide, step, map, x, y, 0, "no mapzeroth")
+        LogStep(guide, step, map, x, y, 0, "no mapzeroth", name, src)
         Warn("nomz", "Mapzeroth missing")
         return false
     end
-    -- short: the name the player sees, then the step as #N (Mapzeroth shows its own "Step 1 of 1" for route legs)
-    local name = ("%s #%s"):format(guide, tostring(step))
     local opts = DB.start and { start = true } or {}
     local ok, res, why = pcall(mz.RouteTo, { mapID = map, x = x, y = y }, name, opts)
     if not ok then
-        LogStep(guide, step, map, x, y, 0, "error " .. tostring(res))
+        LogStep(guide, step, map, x, y, 0, "error " .. tostring(res), name, src)
         Warn("mzerr", "Mapzeroth error")
         return false
     elseif not res then
-        LogStep(guide, step, map, x, y, 0, tostring(why))
+        LogStep(guide, step, map, x, y, 0, tostring(why), name, src)
         Warn("mzfalse", "Mapzeroth said " .. tostring(why))
         return false
     end
-    LogStep(guide, step, map, x, y, 1, "ok")
+    LogStep(guide, step, map, x, y, 1, "ok", name, src)
     return true
 end
 
@@ -253,7 +314,7 @@ local function Check(force)
     if not DB or not DB.on then return "off" end
     force = force or again
     local shown = Guide()          -- also writes the GUIDE line when the guide changed
-    local st, e = Read()
+    local st, e, estep = Read()
 
     if st == "fail" then
         if not seen["fail:" .. e] then
@@ -281,12 +342,13 @@ local function Check(force)
         return "same"
     end
 
-    local step = StepNumber(e)
+    local step = StepNumber(e, estep)
+    local name, src = RouteName(estep, shown, step)
     if InCombatLockdown and InCombatLockdown() then
         again = again or force
         if combatKey ~= key or force then
             combatKey = key
-            LogStep(shown, step, map, x, y, 0, "combat")
+            LogStep(shown, step, map, x, y, 0, "combat", name, src)
         end
         return "queued"
     end
@@ -294,7 +356,7 @@ local function Check(force)
     combatKey = nil
     again = false
     sentKey = key
-    return Send(shown, step, map, x, y) and "sent" or "refused"
+    return Send(shown, step, map, x, y, name, src) and "sent" or "refused"
 end
 
 -- an event: look again soon, once however many events came
